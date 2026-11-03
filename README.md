@@ -271,7 +271,7 @@ frontend/
   nginx.conf
   Dockerfile
 tests/
-  api/                 14 pytest modules (auth, runs, gates, ingest, metrics, aws, ...)
+  api/                 13 pytest modules (auth, runs, gates, ingest, metrics, aws, ...)
   db/                  SQL validation suite + negative controls
   conftest.py          throwaway database, TestClient, auth fixture
 locust/locustfile.py
@@ -329,3 +329,21 @@ Interactive documentation: <http://127.0.0.1:8000/docs>.
 | `database is locked` | SQLite allows one writer; stop duplicate `uvicorn --reload` processes. |
 | Port already in use | `--port 8001` for the API and set `VITE_API_BASE`/proxy accordingly. |
 | Gates blocked unexpectedly | `python scripts/evaluate_gates.py` prints every gate's actual value, threshold and message. |
+
+---
+
+## 12. Verified locally (2026-11-03)
+
+Every number below comes from an executed run on Windows 11 / Python 3.11 / Node 22.
+
+| Verification | Command | Result |
+| --- | --- | --- |
+| Backend starts | `uvicorn app.main:app --port 8000` | `/healthz` → `{"status":"ok"}` |
+| Frontend starts | `npm run dev` | <http://127.0.0.1:5173> → HTTP 200 |
+| pytest | `python -m pytest -q` | **209 passed** in 7.08 s (13 modules, 17 API + 15 SQL checks + negative controls) |
+| SQL validation | `POST /api/data-quality/run` | 15/15 checks passed, 0 failing rows |
+| Playwright | `npx playwright test` | **12 passed** in 32.5 s (setup + 11 catalogued UI cases) |
+| Locust | `locust --headless -u 10 -r 3 -t 15s` | 116 requests, 0 failures (0.00 %), 8.58 req/s, p95 210 ms |
+| Locust ingest | `scripts/push_locust_stats.py` | `LOAD-20261103-154046-476B` → `passed`, 0.0 % error rate |
+| Gates — pass | `scripts/evaluate_gates.py` | 9 gates evaluated, **exit 0**, "All blocking gates passed" |
+| Gates — fail | same script, `GATE_API_PASS_RATE=99` | `overall_pass_rate FAIL 97.67 < 99.0` → **exit 1**, blocked |
