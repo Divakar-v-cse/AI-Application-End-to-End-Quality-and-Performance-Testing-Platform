@@ -1,0 +1,76 @@
+# ===========================================================================
+# AI Application End-to-End Quality and Performance Testing Platform
+#
+#   docker compose up --build          # dashboard on http://localhost:8080
+#   docker compose up -d backend      # API only, docs on :8000/docs
+#
+# Values come from the shell or from .env (both optional - every default works
+# offline). Never commit a real .env.
+# ===========================================================================
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ai-quality-backend:local
+    container_name: ai-quality-backend
+    environment:
+      APP_ENV: ${APP_ENV:-container}
+      SECRET_KEY: ${SECRET_KEY:-local-dev-secret-change-me}
+      DATABASE_URL: sqlite:////app/data/quality.db
+      DATA_DIR: /app/data
+      ARTIFACT_DIR: /app/data/artifacts
+      SEED_ON_STARTUP: ${SEED_ON_STARTUP:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://localhost:8080}
+      DEMO_USER_EMAIL: ${DEMO_USER_EMAIL:-qa@example.com}
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:-Passw0rd!}
+      GATE_API_PASS_RATE: ${GATE_API_PASS_RATE:-95}
+      GATE_UI_PASS_RATE: ${GATE_UI_PASS_RATE:-90}
+      GATE_API_P95_MS: ${GATE_API_P95_MS:-800}
+      GATE_PAGE_LOAD_MS: ${GATE_PAGE_LOAD_MS:-3000}
+      GATE_LOAD_ERROR_RATE: ${GATE_LOAD_ERROR_RATE:-1}
+      GATE_DATA_FAILURES: ${GATE_DATA_FAILURES:-0}
+      ENABLE_UI_RUNNER: ${ENABLE_UI_RUNNER:-false}
+      AWS_ENABLED: ${AWS_ENABLED:-false}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      LAMBDA_FUNCTION: ${LAMBDA_FUNCTION:-}
+      ATHENA_DATABASE: ${ATHENA_DATABASE:-}
+      ATHENA_OUTPUT: ${ATHENA_OUTPUT:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - quality-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-}
+    image: ai-quality-frontend:local
+    container_name: ai-quality-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  quality-data:
+    name: ai-quality-data

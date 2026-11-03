@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# Secrets and local environment. Never commit real credentials.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local SQLite databases and generated artifacts (recreated by `python -m app.seed`)
+backend/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ---------------------------------------------------------------------------
+# Node / frontend
+# ---------------------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+dist/
+build/
+.vite/
+
+# Playwright output and the captured auth state (contains a bearer token)
+playwright-report/
+blob-report/
+test-results/
+playwright/.cache/
+frontend/tests/ui/.auth/
+frontend/test-results/
+
+# ---------------------------------------------------------------------------
+# Logs, temporary files, OS noise
+# ---------------------------------------------------------------------------
+*.log
+logs/
+tmp/
+temp/
+.pytest-data/
+*.tmp
+
+# Generated test reports and load-test output
+reports/
+locust/out/
+newman-report.json
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Editors
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp

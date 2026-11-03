@@ -1,0 +1,268 @@
+name: Quality gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: quality-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  API_BASE_URL: http://127.0.0.1:8000
+  DEMO_USER_EMAIL: qa@example.com
+  DEMO_USER_PASSWORD: Passw0rd!
+  GATE_API_PASS_RATE: "95"
+  GATE_UI_PASS_RATE: "90"
+  GATE_API_P95_MS: "800"
+  GATE_PAGE_LOAD_MS: "3000"
+  GATE_LOAD_ERROR_RATE: "1"
+  GATE_DATA_FAILURES: "0"
+
+jobs:
+  # ------------------------------------------------------------------ pytest
+  backend-tests:
+    name: pytest (API + SQL validation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+
+      - name: Generate the SQL validation file
+        run: python scripts/gen_sql_queries.py
+
+      - name: Run the test suite
+        run: |
+          mkdir -p reports
+          python -m pytest -q --junitxml=reports/pytest.xml --cov=backend.app --cov-report=xml:reports/coverage.xml
+
+      - name: Upload pytest artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-reports
+          path: |
+            reports/pytest.xml
+            reports/coverage.xml
+          if-no-files-found: warn
+
+  # -------------------------------------------------------------- Playwright
+  ui-tests:
+    name: Playwright (UI suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Start the API
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/backend.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/healthz > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/backend.log
+          exit 1
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the UI suite
+        working-directory: frontend
+        env:
+          PYTHON_BIN: python
+          CI: "true"
+        run: npx playwright test
+
+      - name: Ingest the Playwright report
+        if: always()
+        working-directory: frontend
+        run: |
+          REPORT=test-results/playwright-report.json
+          if [ ! -f "$REPORT" ]; then echo "No Playwright report produced"; exit 0; fi
+          TOKEN=$(curl -fsS -X POST http://127.0.0.1:8000/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"${DEMO_USER_EMAIL}\",\"password\":\"${DEMO_USER_PASSWORD}\"}" \
+            | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+          curl -fsS -X POST "http://127.0.0.1:8000/api/ingest/playwright?branch=${GITHUB_REF_NAME}&commit=${GITHUB_SHA::8}" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data-binary @"$REPORT" | tee /tmp/playwright-ingest.json
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-reports
+          path: |
+            frontend/test-results/playwright-report.json
+            frontend/playwright-report/
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------ Locust
+  load-test:
+    name: Locust (smoke load profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: Start the API
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/backend.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/healthz > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/backend.log
+          exit 1
+
+      - name: Run Locust headless
+        run: |
+          mkdir -p locust/out
+          locust -f locust/locustfile.py --host http://127.0.0.1:8000 \
+            --headless -u 20 -r 4 -t 30s --csv locust/out/ci --only-summary
+
+      - name: Publish the statistics
+        run: |
+          mkdir -p reports
+          python scripts/push_locust_stats.py --csv-prefix locust/out/ci \
+            --users 20 --spawn-rate 4 --duration 30 --scenario ci_smoke \
+            --target http://127.0.0.1:8000 | tee reports/locust-ingest.txt
+
+      - name: Upload load-test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: locust-reports
+          path: locust/out/
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------ quality gates
+  quality-gates:
+    name: Evaluate quality gates
+    runs-on: ubuntu-latest
+    needs: [backend-tests, ui-tests, load-test]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Start the API with a fresh database
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/backend.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/healthz > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/backend.log
+          exit 1
+
+      - name: Record the executed suites
+        run: |
+          python - <<'PY'
+          import httpx, os
+          base = os.environ["API_BASE_URL"]
+          with httpx.Client(base_url=base, timeout=60) as client:
+              token = client.post("/api/auth/login", json={
+                  "email": os.environ["DEMO_USER_EMAIL"],
+                  "password": os.environ["DEMO_USER_PASSWORD"],
+              }).json()["access_token"]
+              headers = {"Authorization": f"Bearer {token}"}
+              run = client.post("/api/runs", headers=headers, json={
+                  "suite": "db", "branch": os.environ.get("GITHUB_REF_NAME", "main"),
+                  "commit_sha": os.environ.get("GITHUB_SHA", "local")[:8],
+              })
+              run.raise_for_status()
+              print("Recorded run", run.json()["run"]["run_key"])
+          PY
+
+      - name: Evaluate the gates
+        run: |
+          mkdir -p reports
+          python scripts/evaluate_gates.py --output reports/quality-gates.json | tee reports/quality-gates.txt
+
+      - name: Upload the gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-gate-report
+          path: reports/
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------- docker build
+  docker-build:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: [backend-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: ai-quality-backend:ci
+
+      - name: Build the frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: ai-quality-frontend:ci
